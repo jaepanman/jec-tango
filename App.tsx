@@ -71,7 +71,7 @@ const App: React.FC = () => {
 
   const toggleDarkMode = () => setIsDarkMode(!isDarkMode);
 
-  if (!user) return <Login scriptUrl={SCRIPT_URL} isDarkMode={isDarkMode} toggleDarkMode={toggleDarkMode} onLogin={(u, name, email) => {
+  if (!user) return <Login scriptUrl={SCRIPT_URL} isDarkMode={isDarkMode} toggleDarkMode={toggleDarkMode} onLogin={(u: string, name?: string, email?: string) => {
     const newUser = { username: u, studentName: name, email, isLoggedIn: true };
     setUser(newUser);
     localStorage.setItem('lm_user', JSON.stringify(newUser));
@@ -92,7 +92,7 @@ const App: React.FC = () => {
             deck={activeDeck} 
             user={user}
             allProgress={allProgress}
-            onClose={(stats) => stats ? handleSessionComplete(stats.progress, stats.mastered, stats.total, stats.memoryTime) : setActiveDeck(null)} 
+            onClose={(stats?: { progress: number, mastered: number, total: number, memoryTime?: number }) => stats ? handleSessionComplete(stats.progress, stats.mastered, stats.total, stats.memoryTime) : setActiveDeck(null)} 
           />
         ) : (
           <Dashboard 

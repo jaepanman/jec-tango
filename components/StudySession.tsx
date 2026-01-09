@@ -1,3 +1,4 @@
+
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Deck, Flashcard, SessionMode, User, StudentProgress } from '../types';
 import { playTextToSpeech } from '../services/audio';
@@ -16,9 +17,9 @@ interface DragState {
 }
 
 const SWIPE_THRESHOLD = 80;
-const TAP_THRESHOLD = 10;
+const TAP_THRESHOLD = 15;
 const MEMORY_PAIR_COUNT = 6;
-const MEMORY_PERFECT_CLICKS = 12; // 6 pairs * 2 clicks
+const MEMORY_PERFECT_CLICKS = 12;
 
 const formatTime = (seconds: number) => {
   const mins = Math.floor(seconds / 60);
@@ -39,7 +40,7 @@ const StudySession: React.FC<StudySessionProps> = ({ deck, user, allProgress, on
   const [isResetting, setIsResetting] = useState(false);
   
   const [drag, setDrag] = useState<DragState>({ x: 0, y: 0, isDragging: false });
-  const touchStartPos = useRef<{ x: number, y: number } | null>(null);
+  const pointerStartPos = useRef<{ x: number, y: number, time: number } | null>(null);
 
   // Memory Game State
   const [memoryCards, setMemoryCards] = useState<{id: string, content: string, type: 'front'|'back', isFlipped: boolean, isMatched: boolean}[]>([]);
@@ -111,51 +112,72 @@ const StudySession: React.FC<StudySessionProps> = ({ deck, user, allProgress, on
     selectNextCard(updated);
   }, [cards, currentIndex, selectNextCard, animationClass]);
 
-  const onTouchStart = (e: React.TouchEvent | React.MouseEvent) => {
+  // Pointer Events for robust cross-device gestures
+  const handlePointerDown = (e: React.PointerEvent) => {
     if (mode !== SessionMode.FLASHCARD || showStats || animationClass) return;
     
-    // Check if the click target is the speaker button to avoid flipping
+    // Ignore if speaker button is clicked
     if ((e.target as HTMLElement).closest('.speaker-btn')) return;
 
-    const clientX = 'touches' in e ? (e as React.TouchEvent).touches[0].clientX : (e as React.MouseEvent).clientX;
-    const clientY = 'touches' in e ? (e as React.TouchEvent).touches[0].clientY : (e as React.MouseEvent).clientY;
-    touchStartPos.current = { x: clientX, y: clientY };
+    pointerStartPos.current = { x: e.clientX, y: e.clientY, time: Date.now() };
+    setDrag({ x: 0, y: 0, isDragging: false });
+    
+    // Capture the pointer to handle movement outside the element
+    (e.target as HTMLElement).setPointerCapture(e.pointerId);
   };
 
-  const onTouchMove = (e: React.TouchEvent | React.MouseEvent) => {
-    if (!touchStartPos.current || mode !== SessionMode.FLASHCARD) return;
-    const clientX = 'touches' in e ? (e as React.TouchEvent).touches[0].clientX : (e as React.MouseEvent).clientX;
-    const clientY = 'touches' in e ? (e as React.TouchEvent).touches[0].clientY : (e as React.MouseEvent).clientY;
-    const dx = clientX - touchStartPos.current.x;
-    const dy = clientY - touchStartPos.current.y;
-    if (Math.abs(dx) > TAP_THRESHOLD || Math.abs(dy) > TAP_THRESHOLD) {
-      setDrag({ x: dx, y: dy, isDragging: true });
+  const handlePointerMove = (e: React.PointerEvent) => {
+    if (!pointerStartPos.current || mode !== SessionMode.FLASHCARD || animationClass) return;
+    
+    const dx = e.clientX - pointerStartPos.current.x;
+    const dy = e.clientY - pointerStartPos.current.y;
+    
+    // Threshold to distinguish between intent to drag vs intent to tap
+    if (Math.abs(dx) > 5 || Math.abs(dy) > 5) {
+      // ONLY ALLOW DRAGGING VISUALS IF CARD IS FLIPPED
+      if (isFlipped) {
+        setDrag({ x: dx, y: dy, isDragging: true });
+      } else {
+        // Just track movement internally without moving the card
+        setDrag(prev => ({ ...prev, x: dx, y: dy, isDragging: true }));
+      }
     }
   };
 
-  const onTouchEnd = (e: React.TouchEvent | React.MouseEvent) => {
-    if (!touchStartPos.current || mode !== SessionMode.FLASHCARD) return;
+  const handlePointerUp = (e: React.PointerEvent) => {
+    if (!pointerStartPos.current || mode !== SessionMode.FLASHCARD || animationClass) {
+      pointerStartPos.current = null;
+      return;
+    }
+    
+    (e.target as HTMLElement).releasePointerCapture(e.pointerId);
+    
     const { x, y, isDragging } = drag;
     const absX = Math.abs(x);
     const absY = Math.abs(y);
+    const duration = Date.now() - pointerStartPos.current.time;
 
-    if (!isDragging) {
-      const nextFlipState = !isFlipped;
-      setIsFlipped(nextFlipState);
-      if (!nextFlipState) playTextToSpeech(currentCard.front);
-    } else if (absY > absX && y < -SWIPE_THRESHOLD) {
-      handleGrade(0, true);
-    } else if (absX > absY && x < -SWIPE_THRESHOLD) {
-      handleGrade(1);
-    } else if (absX > absY && x > SWIPE_THRESHOLD) {
-      handleGrade(-1);
+    // Check if it's a tap
+    if (!isDragging || (absX < TAP_THRESHOLD && absY < TAP_THRESHOLD && duration < 300)) {
+      setIsFlipped(!isFlipped);
+    } else {
+      // Swiping logic - Only allowed if card is flipped
+      if (isFlipped) {
+        if (absY > absX && y < -SWIPE_THRESHOLD) {
+          handleGrade(0, true); // Swiped UP -> Mastered
+        } else if (absX > absY && x < -SWIPE_THRESHOLD) {
+          handleGrade(1); // Swiped LEFT -> Correct
+        } else if (absX > absY && x > SWIPE_THRESHOLD) {
+          handleGrade(-1); // Swiped RIGHT -> Incorrect
+        }
+      }
     }
 
     setDrag({ x: 0, y: 0, isDragging: false });
-    touchStartPos.current = null;
+    pointerStartPos.current = null;
   };
 
-  const handleSpeakerClick = (e: React.MouseEvent | React.TouchEvent) => {
+  const handleSpeakerClick = (e: React.PointerEvent | React.MouseEvent) => {
     e.stopPropagation();
     if (currentCard) {
       playTextToSpeech(currentCard.front);
@@ -233,7 +255,6 @@ const StudySession: React.FC<StudySessionProps> = ({ deck, user, allProgress, on
     const isCorrect = answer === cards[currentIndex].back;
     setListeningFeedback(isCorrect ? 'correct' : 'wrong');
     
-    // IMMUTABLE UPDATE: Mark card as mastered if correct so the progress bar updates
     const updated = cards.map((c, i) => 
       i === currentIndex ? { ...c, masteryScore: isCorrect ? 5 : 0 } : c
     );
@@ -284,9 +305,28 @@ const StudySession: React.FC<StudySessionProps> = ({ deck, user, allProgress, on
     return { pb, top3, isNewPB };
   }, [allProgress, deck.name, mode, user.username, timer]);
 
+  // Flashcard overlay logic
+  const dragFeedback = useMemo(() => {
+    // ONLY SHOW OVERLAYS IF THE CARD IS FLIPPED AND BEING DRAGGED
+    if (!drag.isDragging || !isFlipped) return null;
+    const absX = Math.abs(drag.x);
+    const absY = Math.abs(drag.y);
+    const opacity = Math.min(1, Math.max(absX, absY) / (SWIPE_THRESHOLD * 1.5));
+    
+    if (absY > absX && drag.y < -20) {
+      return { label: 'MASTERED', color: 'text-jec-yellow', icon: 'fa-star', opacity };
+    } else if (absX > absY && drag.x < -20) {
+      return { label: 'CORRECT', color: 'text-jec-green', icon: 'fa-check', opacity };
+    } else if (absX > absY && drag.x > 20) {
+      return { label: 'INCORRECT', color: 'text-jec-orange', icon: 'fa-times', opacity };
+    }
+    return null;
+  }, [drag, isFlipped]);
+
   const cardStyle = {
-    transform: `translate(${drag.x}px, ${drag.y}px) rotate(${drag.x / 10}deg) rotateY(${isFlipped ? 180 : 0}deg)`,
-    transition: `transform ${isResetting || drag.isDragging ? '0s' : '0.4s'} cubic-bezier(0.34, 1.56, 0.64, 1)`
+    // Only apply x/y translation if flipped
+    transform: `translate(${isFlipped ? drag.x : 0}px, ${isFlipped ? drag.y : 0}px) rotate(${isFlipped ? drag.x / 10 : 0}deg) rotateY(${isFlipped ? 180 : 0}deg)`,
+    transition: `transform ${isResetting || (drag.isDragging && isFlipped) ? '0s' : '0.6s cubic-bezier(0.34, 1.56, 0.64, 1)'}`
   };
 
   if (!mode) {
@@ -384,38 +424,91 @@ const StudySession: React.FC<StudySessionProps> = ({ deck, user, allProgress, on
 
       {mode === SessionMode.FLASHCARD && (
         <div className="max-w-2xl mx-auto">
-          <div className={`relative h-[480px] perspective-1000 mb-10 select-none touch-none ${animationClass}`}
-            onMouseDown={onTouchStart} onMouseMove={onTouchMove} onMouseUp={onTouchEnd} onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}>
+          <div 
+            className={`relative h-[480px] perspective-1000 mb-10 select-none touch-none ${animationClass}`}
+            onPointerDown={handlePointerDown}
+            onPointerMove={handlePointerMove}
+            onPointerUp={handlePointerUp}
+          >
+            
+            {/* Background "Ghost" card for stability */}
+            <div className="absolute inset-0 bg-zinc-900/50 rounded-[3rem] -z-10 scale-[0.98] border border-white/5"></div>
+
+            {/* OVERLAY FEEDBACK - OUTSIDE THE ROTATING INNER CONTAINER TO FIX MIRRORING */}
+            {dragFeedback && (
+              <div 
+                className="absolute inset-0 z-50 flex items-center justify-center rounded-[3rem] pointer-events-none transition-opacity duration-200 overflow-hidden"
+                style={{ opacity: dragFeedback.opacity }}
+              >
+                <div className={`bg-black/40 backdrop-blur-sm w-full h-full flex flex-col items-center justify-center gap-4`}>
+                  <i className={`fas ${dragFeedback.icon} text-6xl ${dragFeedback.color}`}></i>
+                  <span className={`text-4xl font-black italic tracking-tighter ${dragFeedback.color}`}>{dragFeedback.label}</span>
+                </div>
+              </div>
+            )}
+
             <div className="flip-card-inner preserve-3d shadow-2xl rounded-[3rem] h-full w-full relative" style={cardStyle}>
-              <div className="flip-card-front absolute inset-0 backface-hidden bg-white dark:bg-zinc-900 rounded-[3rem] border-2 border-gray-50 dark:border-white/10 p-10 flex flex-col items-center justify-center text-center preserve-3d">
+              {/* FRONT (ENGLISH) */}
+              <div className="flip-card-front absolute inset-0 backface-hidden bg-white dark:bg-zinc-900 rounded-[3rem] border-2 border-gray-50 dark:border-white/10 p-10 flex flex-col items-center justify-center text-center">
                 <span className="absolute top-8 left-1/2 -translate-x-1/2 text-[10px] font-black text-gray-300 dark:text-zinc-800 uppercase tracking-[0.4em] italic">表面 (ENGLISH)</span>
                 
                 <h3 className="text-5xl md:text-6xl font-black text-gray-900 dark:text-white tracking-tighter leading-tight italic">{currentCard?.front}</h3>
                 
                 <button 
+                  onPointerDown={(e) => e.stopPropagation()}
                   onClick={handleSpeakerClick}
-                  className="speaker-btn absolute bottom-10 right-10 w-14 h-14 bg-jec-yellow/10 dark:bg-white/5 rounded-full flex items-center justify-center text-jec-yellow hover:scale-110 active:scale-90 transition-all border border-jec-yellow/20"
+                  className="speaker-btn absolute bottom-10 right-10 w-14 h-14 bg-jec-yellow/10 dark:bg-white/5 rounded-full flex items-center justify-center text-jec-yellow hover:scale-110 active:scale-90 transition-all border border-jec-yellow/20 z-10"
                 >
                   <i className="fas fa-volume-up text-xl"></i>
                 </button>
+
+                <div className="absolute bottom-8 left-1/2 -translate-x-1/2 text-[10px] font-black text-gray-400 uppercase tracking-widest animate-pulse">
+                  TAP TO FLIP
+                </div>
               </div>
-              <div className="flip-card-back absolute inset-0 backface-hidden bg-black text-white rounded-[3rem] p-10 flex flex-col items-center justify-center text-center shadow-inner border-4 border-jec-yellow preserve-3d" style={{ transform: 'rotateY(180deg)' }}>
+              
+              {/* BACK (JAPANESE) */}
+              <div className="flip-card-back absolute inset-0 backface-hidden bg-black text-white rounded-[3rem] p-10 flex flex-col items-center justify-center text-center shadow-inner border-4 border-jec-yellow" style={{ transform: 'rotateY(180deg)' }}>
                 <span className="absolute top-8 left-1/2 -translate-x-1/2 text-[10px] font-black text-jec-yellow uppercase tracking-[0.4em] italic">裏面 (JAPANESE)</span>
                 <h3 className="text-5xl md:text-6xl font-black text-white tracking-tighter leading-tight italic">{currentCard?.back}</h3>
 
                 <button 
+                  onPointerDown={(e) => e.stopPropagation()}
                   onClick={handleSpeakerClick}
-                  className="speaker-btn absolute bottom-10 right-10 w-14 h-14 bg-white/10 rounded-full flex items-center justify-center text-jec-yellow hover:scale-110 active:scale-90 transition-all border border-white/10"
+                  className="speaker-btn absolute bottom-10 right-10 w-14 h-14 bg-white/10 rounded-full flex items-center justify-center text-jec-yellow hover:scale-110 active:scale-90 transition-all border border-white/10 z-10"
                 >
                   <i className="fas fa-volume-up text-xl"></i>
                 </button>
+
+                <div className="absolute bottom-8 left-1/2 -translate-x-1/2 text-[10px] font-black text-jec-yellow/50 uppercase tracking-widest">
+                  SWIPE TO GRADE
+                </div>
               </div>
             </div>
           </div>
+
           <div className="grid grid-cols-3 gap-4">
-            <button onClick={() => handleGrade(-1)} className="bg-zinc-900 text-jec-orange py-6 rounded-[2rem] font-black uppercase tracking-widest hover:bg-jec-orange hover:text-white transition-all border border-white/5"><i className="fas fa-times mr-2"></i> 苦手</button>
-            <button onClick={() => handleGrade(1)} className="bg-zinc-900 text-jec-green py-6 rounded-[2rem] font-black uppercase tracking-widest hover:bg-jec-green hover:text-black transition-all border border-white/5"><i className="fas fa-check mr-2"></i> 正解</button>
-            <button onClick={() => handleGrade(0, true)} className="bg-jec-yellow text-black py-6 rounded-[2rem] font-black uppercase tracking-widest shadow-xl hover:scale-105 transition-all"><i className="fas fa-star mr-2"></i> 習得</button>
+            <button 
+              onClick={() => isFlipped && handleGrade(-1)} 
+              disabled={!isFlipped}
+              className={`py-6 rounded-[2rem] font-black uppercase tracking-widest transition-all border border-white/5 ${isFlipped ? 'bg-zinc-900 text-jec-orange hover:bg-jec-orange hover:text-white' : 'bg-zinc-950 text-zinc-800 opacity-50 cursor-not-allowed'}`}
+            >
+              <i className="fas fa-times mr-2"></i> 苦手
+            </button>
+            <button 
+              onClick={() => isFlipped && handleGrade(1)} 
+              disabled={!isFlipped}
+              className={`py-6 rounded-[2rem] font-black uppercase tracking-widest transition-all border border-white/5 ${isFlipped ? 'bg-zinc-900 text-jec-green hover:bg-jec-green hover:text-black' : 'bg-zinc-950 text-zinc-800 opacity-50 cursor-not-allowed'}`}
+            >
+              <i className="fas fa-check mr-2"></i> 正解
+            </button>
+            <button 
+              onClick={() => isFlipped && handleGrade(0, true)} 
+              disabled={!isFlipped}
+              className={`py-6 rounded-[2rem] font-black uppercase tracking-widest shadow-xl transition-all ${isFlipped ? 'bg-jec-yellow text-black hover:scale-105' : 'bg-zinc-950 text-zinc-800 opacity-50 cursor-not-allowed'}`}
+            >
+              <i className="fas fa-star mr-2"></i> 習得
+            </button>
           </div>
         </div>
       )}

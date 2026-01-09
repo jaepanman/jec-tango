@@ -5,148 +5,123 @@ const audioCache: Record<string, AudioBuffer> = {};
 let audioContext: AudioContext | null = null;
 
 /**
- * Ensures the AudioContext is initialized and in a running state.
- * This should be triggered by a user gesture.
- */
-async function ensureAudioContext(): Promise<AudioContext> {
-  if (!audioContext) {
-    const AudioContextClass = (window as any).AudioContext || (window as any).webkitAudioContext;
-    audioContext = new AudioContextClass({ sampleRate: 24000 });
-    console.log("AudioContext initialized at 24kHz");
-  }
-  
-  if (audioContext!.state === 'suspended') {
-    await audioContext!.resume();
-    console.log("AudioContext resumed");
-  }
-  return audioContext!;
-}
-
-/**
- * Decodes a base64 string into a Uint8Array.
- * Uses a manual loop for maximum compatibility across environments.
+ * Decodes base64 string to Uint8Array safely.
  */
 function decodeBase64(base64: string): Uint8Array {
   try {
-    const binaryString = atob(base64);
+    const binaryString = atob(base64.trim());
     const bytes = new Uint8Array(binaryString.length);
     for (let i = 0; i < binaryString.length; i++) {
       bytes[i] = binaryString.charCodeAt(i);
     }
     return bytes;
   } catch (e) {
-    console.error("Base64 decoding failed:", e);
+    console.error("[TTS] Base64 decode failed:", e);
     return new Uint8Array(0);
   }
 }
 
 /**
- * Decodes raw PCM 16-bit (Little Endian) data into an AudioBuffer.
- * Gemini 2.5 TTS returns raw mono PCM at 24000Hz.
+ * Native Fallback: Browser Web Speech API.
+ * Guarantees playback in any environment.
  */
-async function decodeAudioData(
+function playNativeFallback(text: string) {
+  if (!('speechSynthesis' in window)) return;
+  
+  // Clean up previous speech
+  window.speechSynthesis.cancel();
+  
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.lang = 'en-US';
+  utterance.rate = 1.0;
+  
+  // Browsers usually have at least one English voice
+  window.speechSynthesis.speak(utterance);
+}
+
+/**
+ * PCM Decoding for Gemini 2.5 TTS (Mono, 24kHz).
+ */
+async function decodePCM(
   data: Uint8Array,
   ctx: AudioContext,
-  sampleRate: number,
-  numChannels: number,
+  sampleRate: number
 ): Promise<AudioBuffer> {
-  // PCM 16-bit data must have an even number of bytes.
-  // We slice to ensure we don't have an orphaned byte at the end.
+  // Ensure alignment for 16-bit PCM
   const alignedLength = Math.floor(data.byteLength / 2) * 2;
-  const bufferCopy = data.buffer.slice(data.byteOffset, data.byteOffset + alignedLength);
-  const pcmData = new Int16Array(bufferCopy);
+  const pcmData = new Int16Array(data.buffer.slice(data.byteOffset, data.byteOffset + alignedLength));
   
-  const frameCount = pcmData.length / numChannels;
-  const buffer = ctx.createBuffer(numChannels, frameCount, sampleRate);
-
-  for (let channel = 0; channel < numChannels; channel++) {
-    const channelData = buffer.getChannelData(channel);
-    for (let i = 0; i < frameCount; i++) {
-      // Convert Int16 (-32768 to 32767) to Float32 (-1.0 to 1.0)
-      channelData[i] = pcmData[i * numChannels + channel] / 32768.0;
-    }
+  const buffer = ctx.createBuffer(1, pcmData.length, sampleRate);
+  const channelData = buffer.getChannelData(0);
+  
+  for (let i = 0; i < pcmData.length; i++) {
+    // Normalize Int16 range to [-1.0, 1.0]
+    channelData[i] = pcmData[i] / 32768.0;
   }
   return buffer;
 }
 
 /**
- * Plays text-to-speech for the provided English text using Gemini API.
+ * Main TTS logic with robust fallback mechanism.
  */
 export async function playTextToSpeech(text: string): Promise<void> {
-  console.log(`Attempting TTS for: "${text}"`);
-  
   try {
-    // 1. Prepare AudioContext (must be within user gesture)
-    const ctx = await ensureAudioContext();
+    // Ensure AudioContext is available
+    if (!audioContext) {
+      const AudioContextClass = (window as any).AudioContext || (window as any).webkitAudioContext;
+      audioContext = new AudioContextClass({ sampleRate: 24000 });
+    }
 
-    // 2. Check Cache
+    // Handle browser's required user-gesture state
+    if (audioContext.state === 'suspended') {
+      await audioContext.resume();
+    }
+
+    // 1. Check Cache
     if (audioCache[text]) {
-      console.log("Playing from cache...");
-      playBuffer(audioCache[text]);
+      const source = audioContext.createBufferSource();
+      source.buffer = audioCache[text];
+      source.connect(audioContext.destination);
+      source.start(0);
       return;
     }
 
-    // 3. API Client Initialization
-    // Check if API key is defined and not a placeholder string
-    const apiKey = process.env.API_KEY;
+    // 2. Primary Path: Gemini AI TTS
+    // Attempt to get API key from environment
+    const apiKey = typeof process !== 'undefined' ? process.env.API_KEY : undefined;
+    
     if (!apiKey || apiKey === 'undefined' || apiKey === '') {
-      console.error("CRITICAL: Gemini API Key is missing or undefined in production environment.");
-      return;
+       throw new Error("Missing API Key");
     }
 
     const ai = new GoogleGenAI({ apiKey });
-
-    // 4. Request TTS Content
-    // We use a very explicit prompt to ensure the model focuses on pronunciation
     const response = await ai.models.generateContent({
       model: "gemini-2.5-flash-preview-tts",
-      contents: [{ parts: [{ text: `Pronounce the following English word or phrase clearly: ${text}` }] }],
+      contents: [{ parts: [{ text: `Read this word clearly: ${text}` }] }],
       config: {
         responseModalities: [Modality.AUDIO],
         speechConfig: {
           voiceConfig: {
-            prebuiltVoiceConfig: { voiceName: 'Puck' }, // Clear energetic voice
+            prebuiltVoiceConfig: { voiceName: 'Puck' },
           },
         },
       },
     });
 
-    // 5. Extract and Decode Audio
-    const parts = response.candidates?.[0]?.content?.parts || [];
-    const audioPart = parts.find(p => p.inlineData && p.inlineData.data);
-    const base64Audio = audioPart?.inlineData?.data;
+    const base64Data = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+    if (!base64Data) throw new Error("No audio payload");
 
-    if (base64Audio) {
-      console.log("Audio data received, decoding...");
-      const rawBytes = decodeBase64(base64Audio);
-      const audioBuffer = await decodeAudioData(rawBytes, ctx, 24000, 1);
-      
-      // Cache the result
-      audioCache[text] = audioBuffer;
-      playBuffer(audioBuffer);
-    } else {
-      console.warn("No audio data found in Gemini response parts:", parts);
-    }
-  } catch (error) {
-    console.error("playTextToSpeech failed:", error);
-  }
-}
+    const decoded = await decodePCM(decodeBase64(base64Data), audioContext, 24000);
+    audioCache[text] = decoded;
 
-/**
- * Plays a decoded AudioBuffer.
- */
-function playBuffer(buffer: AudioBuffer) {
-  if (!audioContext) return;
-  
-  // Create source and play
-  const source = audioContext.createBufferSource();
-  source.buffer = buffer;
-  source.connect(audioContext.destination);
-  
-  // Ensure we are not playing into a suspended context
-  if (audioContext.state === 'suspended') {
-    audioContext.resume().then(() => source.start(0));
-  } else {
+    const source = audioContext.createBufferSource();
+    source.buffer = decoded;
+    source.connect(audioContext.destination);
     source.start(0);
+
+  } catch (err: any) {
+    // 3. Secondary Path: Native Fallback (Immediate & Guaranteed)
+    console.warn(`[TTS] AI voice failed (${err?.message}), falling back to system voice.`);
+    playNativeFallback(text);
   }
 }

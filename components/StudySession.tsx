@@ -20,6 +20,7 @@ const SWIPE_THRESHOLD = 80;
 const TAP_THRESHOLD = 15;
 const MEMORY_PAIR_COUNT = 6;
 const MEMORY_PERFECT_CLICKS = 12;
+const MAX_MASTERY = 5;
 
 const formatTime = (seconds: number) => {
   const mins = Math.floor(seconds / 60);
@@ -55,6 +56,7 @@ const StudySession: React.FC<StudySessionProps> = ({ deck, user, allProgress, on
   const [listeningFeedback, setListeningFeedback] = useState<'correct' | 'wrong' | null>(null);
 
   useEffect(() => {
+    // Initialize cards with 0 mastery
     const shuffled = [...deck.cards].sort(() => Math.random() - 0.5);
     setCards(shuffled.map(c => ({ ...c, masteryScore: 0 })));
   }, [deck]);
@@ -73,17 +75,34 @@ const StudySession: React.FC<StudySessionProps> = ({ deck, user, allProgress, on
 
   const currentCard = cards[currentIndex];
 
-  const selectNextCard = useCallback((updatedCards: Flashcard[]) => {
-    const nextIdx = updatedCards.findIndex((c, i) => i > currentIndex && c.masteryScore < 5);
-    
+  /**
+   * SRS-Lite selection logic
+   */
+  const moveToNextAvailable = useCallback((updatedCards: Flashcard[], lastActionWasIncorrect: boolean) => {
+    let nextIdx = lastActionWasIncorrect ? currentIndex : currentIndex + 1;
+
+    if (nextIdx >= updatedCards.length) {
+      nextIdx = 0;
+    }
+
+    const findNext = (start: number) => {
+      for (let i = 0; i < updatedCards.length; i++) {
+        const checkIdx = (start + i) % updatedCards.length;
+        if (updatedCards[checkIdx].masteryScore < MAX_MASTERY) {
+          return checkIdx;
+        }
+      }
+      return -1;
+    };
+
+    const finalNextIdx = findNext(nextIdx);
+
     setTimeout(() => {
       setIsResetting(true);
-      if (nextIdx === -1) {
-        const wrapIdx = updatedCards.findIndex(c => c.masteryScore < 5);
-        if (wrapIdx === -1) setShowStats(true);
-        else { setCurrentIndex(wrapIdx); setIsFlipped(false); }
+      if (finalNextIdx === -1) {
+        setShowStats(true);
       } else {
-        setCurrentIndex(nextIdx);
+        setCurrentIndex(finalNextIdx);
         setIsFlipped(false);
       }
       setAnimationClass('');
@@ -93,36 +112,38 @@ const StudySession: React.FC<StudySessionProps> = ({ deck, user, allProgress, on
   }, [currentIndex]);
 
   const handleGrade = useCallback((scoreChange: number, isMastered: boolean = false) => {
-    if (animationClass) return;
+    if (animationClass || !currentCard) return;
 
     if (isMastered) setAnimationClass('anim-fly-up');
     else if (scoreChange > 0) setAnimationClass('anim-fly-left');
     else setAnimationClass('anim-fly-right');
 
-    const updated = cards.map((c, i) => 
-      i === currentIndex ? { ...c, masteryScore: isMastered ? 5 : Math.min(5, Math.max(-1, c.masteryScore + scoreChange)) } : c
-    );
+    const newMastery = isMastered ? MAX_MASTERY : Math.min(MAX_MASTERY, Math.max(0, currentCard.masteryScore + scoreChange));
     
-    setCards(updated);
+    let updatedCards = [...cards];
+    const isIncorrect = scoreChange < 0;
+
+    if (isIncorrect) {
+      const [movedCard] = updatedCards.splice(currentIndex, 1);
+      const insertAt = Math.min(updatedCards.length, currentIndex + 3);
+      updatedCards.splice(insertAt, 0, { ...movedCard, masteryScore: newMastery });
+      setStreak(0);
+    } else {
+      updatedCards[currentIndex] = { ...currentCard, masteryScore: newMastery };
+      setStreak(s => s + 1);
+    }
+    
+    setCards(updatedCards);
     setHistoryCount(h => h + 1);
-    
-    if (scoreChange > 0 || isMastered) setStreak(s => s + 1);
-    else setStreak(0);
+    moveToNextAvailable(updatedCards, isIncorrect);
+  }, [cards, currentIndex, currentCard, moveToNextAvailable, animationClass]);
 
-    selectNextCard(updated);
-  }, [cards, currentIndex, selectNextCard, animationClass]);
-
-  // Pointer Events for robust cross-device gestures
   const handlePointerDown = (e: React.PointerEvent) => {
     if (mode !== SessionMode.FLASHCARD || showStats || animationClass) return;
-    
-    // Ignore if speaker button is clicked
     if ((e.target as HTMLElement).closest('.speaker-btn')) return;
 
     pointerStartPos.current = { x: e.clientX, y: e.clientY, time: Date.now() };
     setDrag({ x: 0, y: 0, isDragging: false });
-    
-    // Capture the pointer to handle movement outside the element
     (e.target as HTMLElement).setPointerCapture(e.pointerId);
   };
 
@@ -132,13 +153,10 @@ const StudySession: React.FC<StudySessionProps> = ({ deck, user, allProgress, on
     const dx = e.clientX - pointerStartPos.current.x;
     const dy = e.clientY - pointerStartPos.current.y;
     
-    // Threshold to distinguish between intent to drag vs intent to tap
     if (Math.abs(dx) > 5 || Math.abs(dy) > 5) {
-      // ONLY ALLOW DRAGGING VISUALS IF CARD IS FLIPPED
       if (isFlipped) {
         setDrag({ x: dx, y: dy, isDragging: true });
       } else {
-        // Just track movement internally without moving the card
         setDrag(prev => ({ ...prev, x: dx, y: dy, isDragging: true }));
       }
     }
@@ -157,19 +175,15 @@ const StudySession: React.FC<StudySessionProps> = ({ deck, user, allProgress, on
     const absY = Math.abs(y);
     const duration = Date.now() - pointerStartPos.current.time;
 
-    // Check if it's a tap
     if (!isDragging || (absX < TAP_THRESHOLD && absY < TAP_THRESHOLD && duration < 300)) {
       setIsFlipped(!isFlipped);
-    } else {
-      // Swiping logic - Only allowed if card is flipped
-      if (isFlipped) {
-        if (absY > absX && y < -SWIPE_THRESHOLD) {
-          handleGrade(0, true); // Swiped UP -> Mastered
-        } else if (absX > absY && x < -SWIPE_THRESHOLD) {
-          handleGrade(1); // Swiped LEFT -> Correct
-        } else if (absX > absY && x > SWIPE_THRESHOLD) {
-          handleGrade(-1); // Swiped RIGHT -> Incorrect
-        }
+    } else if (isFlipped) {
+      if (absY > absX && y < -SWIPE_THRESHOLD) {
+        handleGrade(0, true); 
+      } else if (absX > absY && x < -SWIPE_THRESHOLD) {
+        handleGrade(1); 
+      } else if (absX > absY && x > SWIPE_THRESHOLD) {
+        handleGrade(-1); 
       }
     }
 
@@ -179,9 +193,7 @@ const StudySession: React.FC<StudySessionProps> = ({ deck, user, allProgress, on
 
   const handleSpeakerClick = (e: React.PointerEvent | React.MouseEvent) => {
     e.stopPropagation();
-    if (currentCard) {
-      playTextToSpeech(currentCard.front);
-    }
+    if (currentCard) playTextToSpeech(currentCard.front);
   };
 
   const startMemoryGame = () => {
@@ -199,7 +211,6 @@ const StudySession: React.FC<StudySessionProps> = ({ deck, user, allProgress, on
 
   const handleMemoryClick = (index: number) => {
     if (selectedIndices.length === 2 || memoryCards[index].isFlipped || memoryCards[index].isMatched) return;
-
     if (!isTimerActive) setIsTimerActive(true);
     setMemoryClickCount(prev => prev + 1);
 
@@ -256,7 +267,7 @@ const StudySession: React.FC<StudySessionProps> = ({ deck, user, allProgress, on
     setListeningFeedback(isCorrect ? 'correct' : 'wrong');
     
     const updated = cards.map((c, i) => 
-      i === currentIndex ? { ...c, masteryScore: isCorrect ? 5 : 0 } : c
+      i === currentIndex ? { ...c, masteryScore: isCorrect ? MAX_MASTERY : 0 } : c
     );
     setCards(updated);
     setHistoryCount(h => h + 1);
@@ -274,15 +285,22 @@ const StudySession: React.FC<StudySessionProps> = ({ deck, user, allProgress, on
   };
 
   const stats = useMemo(() => {
-    const mastered = cards.filter(c => c.masteryScore >= 5).length;
-    let progressValue = cards.length > 0 ? Math.round((mastered / cards.length) * 100) : 0;
+    const totalPossibleMastery = cards.length * MAX_MASTERY;
+    const currentMasterySum = cards.reduce((sum, c) => sum + c.masteryScore, 0);
+    const masteredCount = cards.filter(c => c.masteryScore >= MAX_MASTERY).length;
+    
+    let progressValue = totalPossibleMastery > 0 
+      ? Math.round((currentMasterySum / totalPossibleMastery) * 100) 
+      : 0;
     
     if (mode === SessionMode.MEMORY) {
       progressValue = memoryClickCount > 0 ? Math.min(100, Math.round((MEMORY_PERFECT_CLICKS / memoryClickCount) * 100)) : 0;
     }
 
     return { 
-      mastered, total: cards.length, progress: progressValue, 
+      mastered: masteredCount, 
+      total: cards.length, 
+      progress: progressValue, 
       memoryTime: mode === SessionMode.MEMORY ? timer : undefined 
     };
   }, [cards, mode, timer, memoryClickCount]);
@@ -305,9 +323,7 @@ const StudySession: React.FC<StudySessionProps> = ({ deck, user, allProgress, on
     return { pb, top3, isNewPB };
   }, [allProgress, deck.name, mode, user.username, timer]);
 
-  // Flashcard overlay logic
   const dragFeedback = useMemo(() => {
-    // ONLY SHOW OVERLAYS IF THE CARD IS FLIPPED AND BEING DRAGGED
     if (!drag.isDragging || !isFlipped) return null;
     const absX = Math.abs(drag.x);
     const absY = Math.abs(drag.y);
@@ -324,7 +340,6 @@ const StudySession: React.FC<StudySessionProps> = ({ deck, user, allProgress, on
   }, [drag, isFlipped]);
 
   const cardStyle = {
-    // Only apply x/y translation if flipped
     transform: `translate(${isFlipped ? drag.x : 0}px, ${isFlipped ? drag.y : 0}px) rotate(${isFlipped ? drag.x / 10 : 0}deg) rotateY(${isFlipped ? 180 : 0}deg)`,
     transition: `transform ${isResetting || (drag.isDragging && isFlipped) ? '0s' : '0.6s cubic-bezier(0.34, 1.56, 0.64, 1)'}`
   };
@@ -371,24 +386,27 @@ const StudySession: React.FC<StudySessionProps> = ({ deck, user, allProgress, on
             </div>
             <div className="p-6 bg-gray-50 dark:bg-black rounded-[2rem] border border-transparent dark:border-white/5">
               <span className="block text-3xl font-black text-jec-green italic">{stats.progress}%</span>
-              <span className="text-[9px] text-gray-400 uppercase font-black tracking-widest mt-1">{mode === SessionMode.MEMORY ? '正解率 (効率)' : '習得率'}</span>
+              <span className="text-[9px] text-gray-400 uppercase font-black tracking-widest mt-1">マスター度</span>
             </div>
           </div>
-          {mode === SessionMode.MEMORY && (
-            <div className="mt-4 text-[10px] font-bold text-zinc-500 uppercase tracking-widest">クリック数: <span className="text-gray-900 dark:text-white text-sm">{memoryClickCount}</span> <span className="ml-2 opacity-50">(最短: 12)</span></div>
-          )}
+
           {mode === SessionMode.MEMORY && leaderboardData && (
             <div className="mt-8 space-y-6 text-left">
               <div className="p-4 bg-jec-yellow/5 border border-jec-yellow/20 rounded-2xl flex items-center justify-between">
                 <span className="text-[10px] font-black uppercase text-jec-yellow tracking-widest">PERSONAL BEST</span>
-                <span className="text-white font-black italic text-xl">{leaderboardData.pb && !leaderboardData.isNewPB ? formatTime(leaderboardData.pb) : formatTime(timer)}</span>
+                <span className="text-white font-black italic text-xl">
+                  {leaderboardData.pb && !leaderboardData.isNewPB ? formatTime(leaderboardData.pb) : formatTime(timer)}
+                </span>
               </div>
               <div className="bg-black/30 p-6 rounded-[2.5rem] border border-white/5">
                 <h4 className="text-[10px] font-black uppercase text-gray-500 tracking-[0.3em] mb-4 text-center">TOP 3 HALL OF FAME</h4>
                 <div className="space-y-2">
                   {leaderboardData.top3.map((entry, i) => (
                     <div key={i} className={`flex items-center justify-between p-3 rounded-xl border ${entry.username === user.username ? 'bg-jec-yellow/10 border-jec-yellow/30' : 'bg-white/5 border-white/5'}`}>
-                      <div className="flex items-center gap-3"><span className={`w-6 h-6 rounded-lg flex items-center justify-center text-[10px] font-black ${i === 0 ? 'bg-jec-yellow text-black' : i === 1 ? 'bg-gray-400 text-black' : 'bg-jec-orange text-white'}`}>{i + 1}</span><span className="text-xs font-black text-gray-300">@{entry.username}</span></div>
+                      <div className="flex items-center gap-3">
+                        <span className={`w-6 h-6 rounded-lg flex items-center justify-center text-[10px] font-black ${i === 0 ? 'bg-jec-yellow text-black' : i === 1 ? 'bg-gray-400 text-black' : 'bg-jec-orange text-white'}`}>{i + 1}</span>
+                        <span className="text-xs font-black text-gray-300">@{entry.username}</span>
+                      </div>
                       <span className="text-xs font-black text-white italic">{formatTime(entry.time)}</span>
                     </div>
                   ))}
@@ -396,6 +414,7 @@ const StudySession: React.FC<StudySessionProps> = ({ deck, user, allProgress, on
               </div>
             </div>
           )}
+
           <button onClick={() => onClose(stats)} className="w-full mt-8 bg-black dark:bg-jec-orange text-white dark:text-black font-black py-5 rounded-2xl text-lg uppercase tracking-tighter shadow-xl active:scale-95 transition-all">ダッシュボードへ戻る</button>
         </div>
       </div>
@@ -407,18 +426,23 @@ const StudySession: React.FC<StudySessionProps> = ({ deck, user, allProgress, on
       <div className="flex items-center justify-between mb-8">
         <button onClick={() => onClose()} className="w-12 h-12 flex items-center justify-center bg-zinc-900 rounded-2xl text-zinc-500 hover:text-jec-orange transition-colors border border-white/5"><i className="fas fa-times"></i></button>
         <div className="flex-grow mx-8 flex flex-col items-center">
-          {mode === SessionMode.MEMORY ? (
-            <div className="text-center"><span className="text-[10px] font-black uppercase text-jec-yellow tracking-[0.4em]">TIME ELAPSED</span><div className="text-2xl font-black text-white italic tracking-tighter mt-1">{formatTime(timer)}</div></div>
-          ) : (
-            <div className="w-full">
-              <div className="flex justify-between text-[10px] text-gray-400 font-black uppercase mb-2 tracking-widest"><span>Progress</span><span className="text-jec-yellow">{stats.progress}%</span></div>
-              <div className="w-full h-2.5 bg-white/5 rounded-full overflow-hidden p-0.5 border border-white/5"><div className="h-full bg-gradient-to-r from-jec-green to-jec-yellow transition-all duration-1000 ease-out rounded-full" style={{ width: `${stats.progress}%` }}></div></div>
+          <div className="w-full">
+            <div className="flex justify-between text-[10px] text-gray-400 font-black uppercase mb-2 tracking-widest">
+              <span>Overall Mastery</span>
+              <span className="text-jec-yellow">{stats.progress}%</span>
             </div>
-          )}
+            <div className="w-full h-2.5 bg-white/5 rounded-full overflow-hidden p-0.5 border border-white/5">
+              <div 
+                className="h-full bg-gradient-to-r from-jec-green via-jec-yellow to-jec-orange transition-all duration-500 ease-out rounded-full" 
+                style={{ width: `${stats.progress}%` }}
+              ></div>
+            </div>
+          </div>
         </div>
         <div className="flex items-center gap-3">
-          {mode === SessionMode.MEMORY && <div className="text-[10px] font-black text-zinc-500 uppercase">Clicks: {memoryClickCount}</div>}
-          <div className="bg-black dark:bg-jec-yellow dark:text-black px-4 py-2 rounded-2xl font-black italic text-sm shadow-lg">{currentIndex + 1} / {cards.length}</div>
+          <div className="bg-black dark:bg-jec-yellow dark:text-black px-4 py-2 rounded-2xl font-black italic text-sm shadow-lg">
+            Mastered: {stats.mastered} / {cards.length}
+          </div>
         </div>
       </div>
 
@@ -430,11 +454,8 @@ const StudySession: React.FC<StudySessionProps> = ({ deck, user, allProgress, on
             onPointerMove={handlePointerMove}
             onPointerUp={handlePointerUp}
           >
-            
-            {/* Background "Ghost" card for stability */}
             <div className="absolute inset-0 bg-zinc-900/50 rounded-[3rem] -z-10 scale-[0.98] border border-white/5"></div>
 
-            {/* OVERLAY FEEDBACK - OUTSIDE THE ROTATING INNER CONTAINER TO FIX MIRRORING */}
             {dragFeedback && (
               <div 
                 className="absolute inset-0 z-50 flex items-center justify-center rounded-[3rem] pointer-events-none transition-opacity duration-200 overflow-hidden"
@@ -448,12 +469,9 @@ const StudySession: React.FC<StudySessionProps> = ({ deck, user, allProgress, on
             )}
 
             <div className="flip-card-inner preserve-3d shadow-2xl rounded-[3rem] h-full w-full relative" style={cardStyle}>
-              {/* FRONT (ENGLISH) */}
               <div className="flip-card-front absolute inset-0 backface-hidden bg-white dark:bg-zinc-900 rounded-[3rem] border-2 border-gray-50 dark:border-white/10 p-10 flex flex-col items-center justify-center text-center">
                 <span className="absolute top-8 left-1/2 -translate-x-1/2 text-[10px] font-black text-gray-300 dark:text-zinc-800 uppercase tracking-[0.4em] italic">表面 (ENGLISH)</span>
-                
                 <h3 className="text-5xl md:text-6xl font-black text-gray-900 dark:text-white tracking-tighter leading-tight italic">{currentCard?.front}</h3>
-                
                 <button 
                   onPointerDown={(e) => e.stopPropagation()}
                   onClick={handleSpeakerClick}
@@ -461,17 +479,12 @@ const StudySession: React.FC<StudySessionProps> = ({ deck, user, allProgress, on
                 >
                   <i className="fas fa-volume-up text-xl"></i>
                 </button>
-
-                <div className="absolute bottom-8 left-1/2 -translate-x-1/2 text-[10px] font-black text-gray-400 uppercase tracking-widest animate-pulse">
-                  TAP TO FLIP
-                </div>
+                <div className="absolute bottom-8 left-1/2 -translate-x-1/2 text-[10px] font-black text-gray-400 uppercase tracking-widest animate-pulse">TAP TO FLIP</div>
               </div>
               
-              {/* BACK (JAPANESE) */}
               <div className="flip-card-back absolute inset-0 backface-hidden bg-black text-white rounded-[3rem] p-10 flex flex-col items-center justify-center text-center shadow-inner border-4 border-jec-yellow" style={{ transform: 'rotateY(180deg)' }}>
                 <span className="absolute top-8 left-1/2 -translate-x-1/2 text-[10px] font-black text-jec-yellow uppercase tracking-[0.4em] italic">裏面 (JAPANESE)</span>
                 <h3 className="text-5xl md:text-6xl font-black text-white tracking-tighter leading-tight italic">{currentCard?.back}</h3>
-
                 <button 
                   onPointerDown={(e) => e.stopPropagation()}
                   onClick={handleSpeakerClick}
@@ -479,10 +492,7 @@ const StudySession: React.FC<StudySessionProps> = ({ deck, user, allProgress, on
                 >
                   <i className="fas fa-volume-up text-xl"></i>
                 </button>
-
-                <div className="absolute bottom-8 left-1/2 -translate-x-1/2 text-[10px] font-black text-jec-yellow/50 uppercase tracking-widest">
-                  SWIPE TO GRADE
-                </div>
+                <div className="absolute bottom-8 left-1/2 -translate-x-1/2 text-[10px] font-black text-jec-yellow/50 uppercase tracking-widest">SWIPE TO GRADE</div>
               </div>
             </div>
           </div>

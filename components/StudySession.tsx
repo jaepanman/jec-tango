@@ -484,7 +484,19 @@ const StudySession: React.FC<StudySessionProps> = ({ deck, user, allProgress, on
               
               <div className="flip-card-back absolute inset-0 backface-hidden bg-black text-white rounded-[3rem] p-10 flex flex-col items-center justify-center text-center shadow-inner border-4 border-jec-yellow" style={{ transform: 'rotateY(180deg)' }}>
                 <span className="absolute top-8 left-1/2 -translate-x-1/2 text-[10px] font-black text-jec-yellow uppercase tracking-[0.4em] italic">裏面 (JAPANESE)</span>
-                <h3 className="text-5xl md:text-6xl font-black text-white tracking-tighter leading-tight italic">{currentCard?.back}</h3>
+                
+                <div className="flex flex-col items-center gap-6">
+                  <h3 className="text-5xl md:text-6xl font-black text-white tracking-tighter leading-tight italic">{currentCard?.back}</h3>
+                  {currentCard?.notes && (
+                    <div className="bg-white/10 px-6 py-3 rounded-2xl border border-white/5 max-w-[80%]">
+                      <p className="text-jec-yellow text-sm md:text-base font-bold italic leading-relaxed">
+                        <i className="fas fa-info-circle mr-2 opacity-50"></i>
+                        {currentCard.notes}
+                      </p>
+                    </div>
+                  )}
+                </div>
+
                 <button 
                   onPointerDown={(e) => e.stopPropagation()}
                   onClick={handleSpeakerClick}
@@ -543,6 +555,11 @@ const StudySession: React.FC<StudySessionProps> = ({ deck, user, allProgress, on
               <i className={`fas fa-volume-up text-5xl ${listeningFeedback === 'correct' ? 'text-jec-green' : listeningFeedback === 'wrong' ? 'text-jec-orange' : 'text-jec-yellow'}`}></i>
             </button>
             <p className="mt-8 text-zinc-500 font-black uppercase tracking-widest text-[10px]">音声を聞いて正しい意味を選択してください</p>
+            {listeningFeedback && cards[currentIndex].notes && (
+              <div className="mt-4 p-4 bg-jec-yellow/10 rounded-2xl border border-jec-yellow/20 animate-in fade-in slide-in-from-top-2 duration-300">
+                <p className="text-jec-yellow text-xs font-bold italic">{cards[currentIndex].notes}</p>
+              </div>
+            )}
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             {listeningOptions.map((option, i) => (

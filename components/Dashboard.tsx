@@ -1,3 +1,4 @@
+
 import React from 'react';
 import { Deck, StudentProgress } from '../types';
 
@@ -66,7 +67,7 @@ const Dashboard: React.FC<DashboardProps> = ({
                   {[
                     "「Users」「Progress」以外のタブ名が学習セットになります",
                     "各シートの1行目はヘッダーとしてスキップされます",
-                    "A列に英語、B列に日本語を入力してください",
+                    "A列に英語、B列に日本語、C列に補足(任意)を入力してください",
                     "シートが空、または1行しかない場合は表示されません"
                   ].map((text, i) => (
                     <li key={i} className="flex items-start gap-3 text-xs font-bold text-gray-500 dark:text-zinc-400">

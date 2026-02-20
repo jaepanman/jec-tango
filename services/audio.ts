@@ -9,29 +9,49 @@ let isUnlocked = false;
  * Unlocks audio on iOS/mobile browsers. 
  * Needs to be called once during a user-initiated event.
  */
-async function unlockAudio(ctx: AudioContext) {
-  if (isUnlocked) return;
+export async function primeAudio() {
+  if (typeof window === 'undefined') return;
+  
+  if (!audioContext) {
+    const AudioContextClass = (window as any).AudioContext || (window as any).webkitAudioContext;
+    if (AudioContextClass) {
+      audioContext = new AudioContextClass();
+    }
+  }
+  
+  const ctx = audioContext;
+  if (!ctx) return;
+  
+  if (isUnlocked && ctx.state !== 'suspended') return;
   
   // Create and play a silent buffer to "prime" the audio engine
-  const buffer = ctx.createBuffer(1, 1, 22050);
-  const source = ctx.createBufferSource();
-  source.buffer = buffer;
-  source.connect(ctx.destination);
-  source.start(0);
-  
-  if (ctx.state === 'suspended') {
-    await ctx.resume();
-  }
-  
-  // Prime Speech Synthesis for iOS
-  if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
-    const silent = new SpeechSynthesisUtterance('');
-    silent.volume = 0;
-    window.speechSynthesis.speak(silent);
-  }
+  try {
+    const buffer = ctx.createBuffer(1, 1, 22050);
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(ctx.destination);
+    source.start(0);
+    
+    if (ctx.state === 'suspended') {
+      await ctx.resume();
+    }
+    
+    // Prime Speech Synthesis for iOS
+    if ('speechSynthesis' in window) {
+      const silent = new SpeechSynthesisUtterance('');
+      silent.volume = 0;
+      window.speechSynthesis.speak(silent);
+    }
 
-  isUnlocked = true;
-  console.log("[TTS] Audio engine primed and unlocked.");
+    isUnlocked = true;
+    console.log("[TTS] Audio engine primed and unlocked.");
+  } catch (e) {
+    console.warn("[TTS] Failed to prime audio:", e);
+  }
+}
+
+async function unlockAudio(ctx: AudioContext) {
+  await primeAudio();
 }
 
 /**
@@ -103,17 +123,19 @@ export async function playTextToSpeech(text: string): Promise<void> {
     // 1. Initialize/Get AudioContext
     if (!audioContext) {
       const AudioContextClass = (window as any).AudioContext || (window as any).webkitAudioContext;
-      audioContext = new AudioContextClass({ sampleRate: 24000 });
+      audioContext = new AudioContextClass();
     }
 
     const ctx = audioContext;
     if (!ctx) throw new Error("AudioContext init failed");
 
-    // 2. Critical: Unlock and Resume on every call to handle iOS state resets
-    await unlockAudio(ctx);
+    // 2. Critical for iOS: Resume context IMMEDIATELY in the user gesture call stack
     if (ctx.state === 'suspended') {
       await ctx.resume();
     }
+    
+    // Unlock if not already done
+    await unlockAudio(ctx);
 
     // 3. Check Cache
     if (audioCache[text]) {
@@ -125,9 +147,10 @@ export async function playTextToSpeech(text: string): Promise<void> {
     }
 
     // 4. Primary Path: Gemini AI TTS
-    const apiKey = process.env.API_KEY;
+    const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey || apiKey === 'undefined' || apiKey === '') {
-       throw new Error("Missing API Key");
+       console.error("[TTS] GEMINI_API_KEY is not set. Falling back to native TTS.");
+       throw new Error("Missing GEMINI_API_KEY");
     }
 
     const ai = new GoogleGenAI({ apiKey });
@@ -138,17 +161,23 @@ export async function playTextToSpeech(text: string): Promise<void> {
         responseModalities: [Modality.AUDIO],
         speechConfig: {
           voiceConfig: {
-            prebuiltVoiceConfig: { voiceName: 'Puck' },
+            // 'Puck', 'Charon', 'Kore', 'Fenrir', 'Zephyr'
+            prebuiltVoiceConfig: { voiceName: 'Kore' },
           },
         },
       },
     });
 
     const base64Data = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-    if (!base64Data) throw new Error("Empty audio payload");
+    if (!base64Data) throw new Error("Empty audio payload from Gemini");
 
     const decoded = await decodePCM(decodeBase64(base64Data), ctx, 24000);
     audioCache[text] = decoded;
+
+    // Re-check context state before playing (iOS can suspend it if there's a long delay)
+    if (ctx.state === 'suspended') {
+      await ctx.resume();
+    }
 
     const source = ctx.createBufferSource();
     source.buffer = decoded;
@@ -156,7 +185,7 @@ export async function playTextToSpeech(text: string): Promise<void> {
     source.start(0);
 
   } catch (err: any) {
-    console.warn(`[TTS] AI voice failed (${err?.message}), using fallback.`);
+    console.warn(`[TTS] Gemini AI voice failed: ${err?.message}. Using native fallback.`);
     playNativeFallback(text);
   }
 }

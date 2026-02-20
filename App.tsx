@@ -17,13 +17,22 @@ const App: React.FC = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isDarkMode, setIsDarkMode] = useState<boolean>(() => {
-    const saved = localStorage.getItem('lm_dark_mode');
-    return saved ? JSON.parse(saved) : true;
+    try {
+      const saved = localStorage.getItem('lm_dark_mode');
+      return saved ? JSON.parse(saved) : true;
+    } catch (e) {
+      return true;
+    }
   });
 
   useEffect(() => {
-    const savedUser = localStorage.getItem('lm_user');
-    if (savedUser) setUser(JSON.parse(savedUser));
+    try {
+      const savedUser = localStorage.getItem('lm_user');
+      if (savedUser) setUser(JSON.parse(savedUser));
+    } catch (e) {
+      console.error("Failed to parse saved user", e);
+      localStorage.removeItem('lm_user');
+    }
   }, []);
 
   useEffect(() => {

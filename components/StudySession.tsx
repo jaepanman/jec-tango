@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Deck, Flashcard, SessionMode, User, StudentProgress } from '../types';
-import { playTextToSpeech } from '../services/audio';
+import { playTextToSpeech, primeAudio } from '../services/audio';
 
 interface StudySessionProps {
   deck: Deck;
@@ -191,12 +191,14 @@ const StudySession: React.FC<StudySessionProps> = ({ deck, user, allProgress, on
     pointerStartPos.current = null;
   };
 
-  const handleSpeakerClick = (e: React.PointerEvent | React.MouseEvent) => {
+  const handleSpeakerClick = async (e: React.PointerEvent | React.MouseEvent) => {
     e.stopPropagation();
+    await primeAudio(); // Ensure unlocked
     if (currentCard) playTextToSpeech(currentCard.front);
   };
 
-  const startMemoryGame = () => {
+  const startMemoryGame = async () => {
+    await primeAudio();
     const selected = [...deck.cards].sort(() => Math.random() - 0.5).slice(0, MEMORY_PAIR_COUNT);
     const pairs = [
       ...selected.map(c => ({ id: c.id, content: c.front, type: 'front' as const, isFlipped: false, isMatched: false })),
@@ -247,7 +249,8 @@ const StudySession: React.FC<StudySessionProps> = ({ deck, user, allProgress, on
     }
   };
 
-  const startListeningGame = () => {
+  const startListeningGame = async () => {
+    await primeAudio();
     setMode(SessionMode.LISTENING);
     setupListeningTurn(0);
   };
@@ -352,7 +355,7 @@ const StudySession: React.FC<StudySessionProps> = ({ deck, user, allProgress, on
           <p className="text-jec-yellow text-xs font-bold tracking-widest uppercase">トレーニングモードを選択してください</p>
         </div>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-          <button onClick={() => setMode(SessionMode.FLASHCARD)} className="group bg-zinc-900 border border-white/5 p-10 rounded-[2.5rem] hover:border-jec-green transition-all text-center flex flex-col items-center shadow-xl">
+          <button onClick={async () => { await primeAudio(); setMode(SessionMode.FLASHCARD); }} className="group bg-zinc-900 border border-white/5 p-10 rounded-[2.5rem] hover:border-jec-green transition-all text-center flex flex-col items-center shadow-xl">
             <div className="w-20 h-20 bg-jec-green/10 rounded-full flex items-center justify-center mb-6 group-hover:scale-110 transition-transform"><i className="fas fa-clone text-jec-green text-3xl"></i></div>
             <h3 className="text-white font-black text-xl mb-2">単語カード</h3>
             <p className="text-zinc-500 text-xs font-bold">直感的なスワイプ学習</p>

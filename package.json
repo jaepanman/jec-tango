@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -p tsconfig.json --noEmit && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "lint": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "@google/genai": "^1.35.0",
